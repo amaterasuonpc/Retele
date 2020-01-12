@@ -5,6 +5,7 @@
 #include <netinet/in.h>
 #include <errno.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -16,7 +17,140 @@
 
 int ID = 0; //Unique id for thread
 int IDorder[10];
+int IDactiv[10];
 char MainCommand[64];
+
+void openterminal()
+{
+    system("x-terminal-emulator -e cat /dev/pts/1");
+}
+
+int kbhit()
+{
+    struct timeval tv = {0L, 0L};
+    fd_set fds;
+    int OP;
+    OP = open("/dev/pts/5", O_RDWR);
+
+    FD_ZERO(&fds);
+    FD_SET(OP, &fds);
+
+    return select(1, &fds, NULL, NULL, &tv);
+}
+
+int interactive_shell_session(ssh_session session)
+{
+
+    sleep(1);
+    ssh_channel channel;
+    char buffer[256];
+    int nbytes, nwritten;
+    int rc;
+    int OP;
+    int k = 0;
+    int i = 0;
+    FILE *file;
+    file = fopen("/dev/pts/4", "w");
+    pthread_t pid;
+    pthread_create(&pid, NULL, openterminal, NULL);
+    sleep(1);
+
+    if (mkfifo("/dev/pts/4", 0666) < 0)
+    {
+        if (errno != EEXIST) // errno=17 for "File already exists"
+        {
+            perror("Eroare la crearea canalului 'Canal'. Cauza erorii");
+            //exit(1);
+        }
+    }
+
+    OP = open("/dev/pts/4", O_RDWR);
+
+    channel = ssh_channel_new(session);
+    if (channel == NULL)
+        return SSH_ERROR;
+
+    rc = ssh_channel_open_session(channel);
+    if (rc != SSH_OK)
+    {
+        ssh_channel_free(channel);
+        return rc;
+    }
+
+    rc = ssh_channel_request_pty(channel);
+    if (rc != SSH_OK)
+        return rc;
+
+    rc = ssh_channel_change_pty_size(channel, 80, 24);
+    if (rc != SSH_OK)
+        return rc;
+
+    rc = ssh_channel_request_shell(channel);
+    if (rc != SSH_OK)
+        return rc;
+
+    
+nbytes = ssh_channel_read(channel, buffer, sizeof(buffer), 0);
+    if (nbytes < 0)
+    {
+        return SSH_ERROR;
+        printf("eroare1");
+    }
+    if (nbytes > 0)
+    {
+        nwritten = write(OP, buffer, nbytes);
+        //fflush(file);
+
+        if (nwritten != nbytes)
+        {
+            return SSH_ERROR;
+            printf("eroare2");
+        }
+    }
+    sleep(1);
+    while (ssh_channel_is_open(channel) &&
+           !ssh_channel_is_eof(channel))
+    {
+        k = 25;
+         while (k)
+        {
+            nbytes = ssh_channel_read_nonblocking(channel, buffer, sizeof(buffer), 0);
+            if (nbytes < 0)
+            {
+                return SSH_ERROR;
+                printf("eroare1");
+            }
+            if (nbytes > 0)
+            {
+                nwritten = write(OP, buffer, nbytes);
+                //fflush(file);
+
+                if (nwritten != nbytes)
+                {
+                    return SSH_ERROR;
+                    printf("eroare2");
+                }
+            }
+            k--;
+        }
+        nbytes = read(OP, buffer, sizeof(buffer));
+        if (nbytes < 0)
+            return SSH_ERROR;
+        if (nbytes > 0)
+        {
+            nwritten = ssh_channel_write(channel, buffer, nbytes);
+            if (nwritten != nbytes)
+                return SSH_ERROR;
+            sleep(1);
+        }
+    }
+   // printf("a primit eof?");
+    ssh_channel_close(channel);
+    ssh_channel_send_eof(channel);
+    ssh_channel_free(channel);
+
+    return SSH_OK;
+}
 
 int verify_knownhost(ssh_session session)
 {
@@ -124,6 +258,7 @@ int execute_command(ssh_session session)
     {
         ssh_channel_free(channel);
         return rc;
+        printf("channel not okay");
     }
 
     rc = ssh_channel_request_exec(channel, MainCommand);
@@ -132,16 +267,19 @@ int execute_command(ssh_session session)
         ssh_channel_close(channel);
         ssh_channel_free(channel);
         return rc;
+        printf("command Not okay");
     }
 
     nbytes = ssh_channel_read(channel, buffer, sizeof(buffer), 0);
     while (nbytes > 0)
     {
+        //printf("number of bytes=%d", nbytes);
         if (write(1, buffer, nbytes) != (unsigned int)nbytes)
         {
             ssh_channel_close(channel);
             ssh_channel_free(channel);
             return SSH_ERROR;
+            printf("ssh error");
         }
         nbytes = ssh_channel_read(channel, buffer, sizeof(buffer), 0);
     }
@@ -151,12 +289,13 @@ int execute_command(ssh_session session)
         ssh_channel_close(channel);
         ssh_channel_free(channel);
         return SSH_ERROR;
+        printf("errorchannel");
     }
 
     ssh_channel_send_eof(channel);
     ssh_channel_close(channel);
     ssh_channel_free(channel);
-    printf("\n");
+    // printf("nr of bytes=%d\n", nbytes);
 
     return SSH_OK;
 }
@@ -189,9 +328,13 @@ int input_check(char *buffer) //Self explanatory
         printf("invalid\n");
         return -1;
     }
-    if(strstr(command,"disconnect"))
+    if (strstr(command, "disconnect"))
     {
-        k=2;
+        k = 2;
+    }
+    if (strstr(command, "interactive"))
+    {
+        k = 3;
     }
     strcpy(MainCommand, command);
     // printf("command=%s\n",command);
@@ -216,9 +359,9 @@ int input_check(char *buffer) //Self explanatory
 
     printf("target=");
     for (int j = 0; j < 10; j++)
-        if (IDorder[j] != 0 )   
+        if (IDorder[j] != 0)
             printf("%d,", j);
-            printf("\n\n");
+    printf("\n\n");
     fflush(stdout);
     return 0;
 }
@@ -227,7 +370,7 @@ void connection(char *IP) //Establishes the connection to the host(s)
 {
     char *IPadd = (char *)malloc(sizeof(char) * strlen(IP));
     strcpy(IPadd, IP);
-
+    pthread_t pid;
     ssh_session my_ssh_session;
     int rc;
     int idlocal;
@@ -272,8 +415,14 @@ void connection(char *IP) //Establishes the connection to the host(s)
     {
 
         printf("Auth Succesful");
-
-        idlocal = ++ID;
+        for (int l = 1; l < 10; l++)
+            if (IDactiv[l] == 0)
+            {
+                idlocal = l;
+                IDactiv[l] = 1;
+                break;
+            }
+        //idlocal = ++ID;
         printf("->>%s ID=%d \n", IPadd, idlocal);
     }
     fflush(stdout);
@@ -282,16 +431,23 @@ void connection(char *IP) //Establishes the connection to the host(s)
         if (IDorder[idlocal] == 1)
         {
             sleep(1);
-            execute_command(my_ssh_session);
+            pthread_create(&pid, NULL, execute_command, my_ssh_session);
+            // execute_command(my_ssh_session);
             IDorder[idlocal] = 0;
         }
-        if(IDorder[idlocal]== 2)
+        if (IDorder[idlocal] == 2)
         {
             ssh_disconnect(my_ssh_session);
-        ssh_free(my_ssh_session);
-        printf("Disconnected from %s \n",IPadd);
-        break;
-        
+            ssh_free(my_ssh_session);
+            printf("Disconnected from %s \n", IPadd);
+            IDactiv[idlocal] = 0;
+            IDorder[idlocal] = 0;
+            break;
+        }
+        if (IDorder[idlocal] == 3)
+        {
+            interactive_shell_session(my_ssh_session);
+            IDorder[idlocal] = 0;
         }
     }
     // execute_command(my_ssh_session);
@@ -300,7 +456,7 @@ void connection(char *IP) //Establishes the connection to the host(s)
 int main(int argc, const char **argv)
 {
     char buffer[512];
-    char * point;
+    char *point;
     pthread_t th[100]; //Identificatorii thread-urilor care se vor crea
     int i = 0;
     FILE *file;
@@ -326,22 +482,23 @@ int main(int argc, const char **argv)
 
         if (strstr(buffer, "quit"))
             break;
-        if(strstr(buffer,"try"))
-            {
-                int k=0;
-                point=strchr(buffer,'1');
-                point[strlen(point)-1]=NULL;
-                pthread_create(&th[i++], NULL, &connection, point);
-                sleep(1);
-            }
-            else
-            {
-                fflush(stdout);
-        input_check(buffer);
-            }
-            
-        
-        
+        if (strstr(buffer, "try"))
+        {
+            int k = 0;
+            point = strchr(buffer, '1');
+            point[strlen(point) - 1] = NULL;
+            pthread_create(&th[i++], NULL, &connection, point);
+            sleep(1);
+        }
+        else
+        {
+            fflush(stdout);
+            input_check(buffer);
+        }
+        if (strstr(buffer, "interactive"))
+        {
+            sleep(8);
+        }
     }
 
     return 0;
